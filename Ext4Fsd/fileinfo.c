@@ -39,6 +39,82 @@ static int Ext2IterateAllEa(struct ext4_xattr_ref *xattr_ref, struct ext4_xattr_
     return EXT4_XATTR_ITERATE_CONT;
 }
 
+/*
+ * WSL 1 support. lxcore (VolFs/WslFs) and wslservice query the Linux metadata of a
+ * file with FileStatLxInformation and mark every directory case-sensitive with
+ * FileCaseSensitiveInformation. On ext4 the metadata lives in the inode and every
+ * directory is case-sensitive, so both map directly.
+ */
+#define EXT2_FILE_STAT_INFORMATION          68
+#define EXT2_FILE_STAT_LX_INFORMATION       70
+#define EXT2_FILE_CASE_SENSITIVE_INFORMATION 71
+#define EXT2_FILE_CS_FLAG_CASE_SENSITIVE_DIR 0x00000001
+#define EXT2_LX_FILE_METADATA_HAS_UID       0x1
+#define EXT2_LX_FILE_METADATA_HAS_GID       0x2
+#define EXT2_LX_FILE_METADATA_HAS_MODE      0x4
+#define EXT2_LX_FILE_METADATA_HAS_DEVICE_ID 0x8
+#define EXT2_LX_FILE_CASE_SENSITIVE_DIR     0x10
+
+typedef struct _EXT2_FILE_STAT_LX_INFORMATION {
+    LARGE_INTEGER FileId;
+    LARGE_INTEGER CreationTime;
+    LARGE_INTEGER LastAccessTime;
+    LARGE_INTEGER LastWriteTime;
+    LARGE_INTEGER ChangeTime;
+    LARGE_INTEGER AllocationSize;
+    LARGE_INTEGER EndOfFile;
+    ULONG FileAttributes;
+    ULONG ReparseTag;
+    ULONG NumberOfLinks;
+    ACCESS_MASK EffectiveAccess;
+    ULONG LxFlags;          /* only in the Lx variant */
+    ULONG LxUid;
+    ULONG LxGid;
+    ULONG LxMode;
+    ULONG LxDeviceIdMajor;
+    ULONG LxDeviceIdMinor;
+} EXT2_FILE_STAT_LX_INFORMATION, *PEXT2_FILE_STAT_LX_INFORMATION;
+
+#define EXT2_FILE_STAT_INFORMATION_SIZE \
+    FIELD_OFFSET(EXT2_FILE_STAT_LX_INFORMATION, LxFlags)
+
+static VOID
+Ext2FillStatLx(PEXT2_FCB Fcb, PEXT2_MCB Mcb, PEXT2_FILE_STAT_LX_INFORMATION St)
+{
+    struct inode *Inode = &Mcb->Inode;
+    ULONG Type = Inode->i_mode & S_IFMT;
+
+    St->FileId.QuadPart = Inode->i_ino;
+    St->CreationTime = Mcb->CreationTime;
+    St->LastAccessTime = Mcb->LastAccessTime;
+    St->LastWriteTime = Mcb->LastWriteTime;
+    St->ChangeTime = Mcb->ChangeTime;
+    if (IsDirectory(Fcb)) {
+        St->AllocationSize.QuadPart = 0;
+        St->EndOfFile.QuadPart = 0;
+    } else {
+        St->AllocationSize = Fcb->Header.AllocationSize;
+        St->EndOfFile = Fcb->Header.FileSize;
+    }
+    St->FileAttributes = Mcb->FileAttr ? Mcb->FileAttr : FILE_ATTRIBUTE_NORMAL;
+    St->ReparseTag = 0;
+    St->NumberOfLinks = Inode->i_nlink;
+    St->EffectiveAccess = FILE_ALL_ACCESS;
+    St->LxFlags = EXT2_LX_FILE_METADATA_HAS_UID | EXT2_LX_FILE_METADATA_HAS_GID |
+                  EXT2_LX_FILE_METADATA_HAS_MODE;
+    if (IsDirectory(Fcb))
+        St->LxFlags |= EXT2_LX_FILE_CASE_SENSITIVE_DIR;
+    St->LxUid = Inode->i_uid;
+    St->LxGid = Inode->i_gid;
+    St->LxMode = Inode->i_mode;
+    if (Type == S_IFCHR || Type == S_IFBLK) {
+        ULONG Dev = Inode->i_block[0] ? Inode->i_block[0] : Inode->i_block[1];
+        St->LxFlags |= EXT2_LX_FILE_METADATA_HAS_DEVICE_ID;
+        St->LxDeviceIdMajor = (Dev & 0xfff00) >> 8;
+        St->LxDeviceIdMinor = (Dev & 0xff) | ((Dev >> 12) & 0xfff00);
+    }
+}
+
 NTSTATUS
 Ext2QueryFileInformation (IN PEXT2_IRP_CONTEXT IrpContext)
 {
@@ -464,6 +540,37 @@ Ext2QueryFileInformation (IN PEXT2_IRP_CONTEXT IrpContext)
         }
         break;
 #endif // (_WIN32_WINNT >= 0x0500)
+
+        case EXT2_FILE_STAT_INFORMATION:
+        case EXT2_FILE_STAT_LX_INFORMATION:
+        {
+            EXT2_FILE_STAT_LX_INFORMATION St;
+            ULONG Size = (FileInformationClass == EXT2_FILE_STAT_INFORMATION) ?
+                         EXT2_FILE_STAT_INFORMATION_SIZE : sizeof(St);
+
+            if (Length < Size) {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                __leave;
+            }
+            RtlZeroMemory(&St, sizeof(St));
+            Ext2FillStatLx(Fcb, Mcb, &St);
+            RtlCopyMemory(Buffer, &St, Size);
+            Irp->IoStatus.Information = Size;
+            Status = STATUS_SUCCESS;
+        }
+        break;
+
+        case EXT2_FILE_CASE_SENSITIVE_INFORMATION:
+        {
+            if (Length < sizeof(ULONG)) {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                __leave;
+            }
+            *(PULONG)Buffer = IsDirectory(Fcb) ? EXT2_FILE_CS_FLAG_CASE_SENSITIVE_DIR : 0;
+            Irp->IoStatus.Information = sizeof(ULONG);
+            Status = STATUS_SUCCESS;
+        }
+        break;
 
         case FileStreamInformation:
             Status = STATUS_INVALID_PARAMETER;
@@ -1018,6 +1125,25 @@ Ext2SetFileInformation (IN PEXT2_IRP_CONTEXT IrpContext)
             __leave;
         }
 
+        break;
+
+        case EXT2_FILE_CASE_SENSITIVE_INFORMATION:
+        {
+            ULONG Flags;
+
+            if (Length < sizeof(ULONG)) {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                __leave;
+            }
+            Flags = *(PULONG)Buffer;
+            if (!IsDirectory(Fcb) || (Flags & ~EXT2_FILE_CS_FLAG_CASE_SENSITIVE_DIR)) {
+                Status = STATUS_INVALID_PARAMETER;
+            } else if (!(Flags & EXT2_FILE_CS_FLAG_CASE_SENSITIVE_DIR)) {
+                Status = STATUS_NOT_SUPPORTED;  /* ext4 directories are always case-sensitive */
+            } else {
+                Status = STATUS_SUCCESS;
+            }
+        }
         break;
 
         default:

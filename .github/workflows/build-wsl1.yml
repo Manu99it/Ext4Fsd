@@ -1,0 +1,45 @@
+name: build-wsl1
+
+# Builds the Ext4Fsd driver of the wsl1-volfs branch (test-signed, x64 Release) and
+# publishes it as a prerelease. Not an official build: it loads only with test signing.
+
+on:
+  push:
+    branches: [wsl1-volfs]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+    - uses: actions/checkout@v4
+    - uses: microsoft/setup-msbuild@v2
+    - name: Put WDK tools on PATH
+      shell: pwsh
+      run: |
+        $kits = 'C:/Program Files (x86)/Windows Kits/10/bin'
+        $bin = Get-ChildItem $kits -Directory |
+          Where-Object { Test-Path (Join-Path $_.FullName 'x86/stampinf.exe') } |
+          Sort-Object Name | Select-Object -Last 1
+        Join-Path $bin.FullName 'x86' | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+        Join-Path $bin.FullName 'x64' | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+        "using $($bin.FullName)"
+    - name: Build the driver
+      shell: cmd
+      run: msbuild Ext4Fsd\Ext4Fsd.vcxproj /m /p:Configuration=Release /p:Platform=x64
+    - name: Publish as a prerelease
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $files = Get-ChildItem -Recurse -File -Include *.sys, *.cer, *.pdb, *.inf |
+          Where-Object { $_.FullName -match '\\(Release|x64)\\' -and $_.FullName -notmatch '\\obj\\' } |
+          ForEach-Object FullName
+        $files
+        gh release create "wsl1-volfs-${{ github.run_number }}" --repo ${{ github.repository }} `
+          --target ${{ github.sha }} --prerelease `
+          --title "WSL 1 test build ${{ github.run_number }}" `
+          --notes "Test-signed x64 build of the wsl1-volfs branch (FileStatLxInformation and per-directory case sensitivity for WSL 1). Loads only with test signing enabled." @files
