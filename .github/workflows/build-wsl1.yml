@@ -35,9 +35,8 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
-        $files = Get-ChildItem -Recurse -File -Include *.sys, *.cer, *.pdb, *.inf |
-          Where-Object { $_.FullName -match '\\(Release|x64)\\' -and $_.FullName -notmatch '\\obj\\' } |
-          ForEach-Object FullName
+        $out = 'Ext4Fsd/Release/x64'
+        $files = @("$out/Ext2Fsd.sys", "$out/Ext2Fsd.cer", "$out/Ext2Fsd.pdb")
         $files
         gh release create "wsl1-volfs-${{ github.run_number }}" --repo ${{ github.repository }} `
           --target ${{ github.sha }} --prerelease `
