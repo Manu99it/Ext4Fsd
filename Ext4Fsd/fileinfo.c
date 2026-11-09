@@ -55,7 +55,7 @@ static int Ext2IterateAllEa(struct ext4_xattr_ref *xattr_ref, struct ext4_xattr_
 #define EXT2_LX_FILE_METADATA_HAS_DEVICE_ID 0x8
 #define EXT2_LX_FILE_CASE_SENSITIVE_DIR     0x10
 
-typedef struct _EXT2_FILE_STAT_LX_INFORMATION {
+typedef struct _EXT2_STAT_LX {
     LARGE_INTEGER FileId;
     LARGE_INTEGER CreationTime;
     LARGE_INTEGER LastAccessTime;
@@ -73,13 +73,13 @@ typedef struct _EXT2_FILE_STAT_LX_INFORMATION {
     ULONG LxMode;
     ULONG LxDeviceIdMajor;
     ULONG LxDeviceIdMinor;
-} EXT2_FILE_STAT_LX_INFORMATION, *PEXT2_FILE_STAT_LX_INFORMATION;
+} EXT2_STAT_LX, *PEXT2_STAT_LX;
 
 #define EXT2_FILE_STAT_INFORMATION_SIZE \
-    FIELD_OFFSET(EXT2_FILE_STAT_LX_INFORMATION, LxFlags)
+    FIELD_OFFSET(EXT2_STAT_LX, LxFlags)
 
 static VOID
-Ext2FillStatLx(PEXT2_FCB Fcb, PEXT2_MCB Mcb, PEXT2_FILE_STAT_LX_INFORMATION St)
+Ext2FillStatLx(PEXT2_FCB Fcb, PEXT2_MCB Mcb, PEXT2_STAT_LX St)
 {
     struct inode *Inode = &Mcb->Inode;
     ULONG Type = Inode->i_mode & S_IFMT;
@@ -544,7 +544,7 @@ Ext2QueryFileInformation (IN PEXT2_IRP_CONTEXT IrpContext)
         case EXT2_FILE_STAT_INFORMATION:
         case EXT2_FILE_STAT_LX_INFORMATION:
         {
-            EXT2_FILE_STAT_LX_INFORMATION St;
+            EXT2_STAT_LX St;
             ULONG Size = (FileInformationClass == EXT2_FILE_STAT_INFORMATION) ?
                          EXT2_FILE_STAT_INFORMATION_SIZE : sizeof(St);
 
